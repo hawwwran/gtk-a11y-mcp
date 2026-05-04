@@ -44,18 +44,27 @@ The server **does not write any system settings**. `status` reads the gsetting p
 
 ## Install
 
+One-liner (auto-fetches the latest release):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hawwwran/gtk-a11y-mcp/main/install.sh | bash
+```
+
+Or clone the repo and run the same script — it auto-detects whether it's running inside a checkout (dev mode, installs editable from your working tree) or standalone (downloads the latest release zip):
+
 ```bash
 git clone https://github.com/hawwwran/gtk-a11y-mcp.git
 cd gtk-a11y-mcp
-./scripts/install.sh
+./install.sh
 ```
 
-`scripts/install.sh` is idempotent and does everything end-to-end:
+`install.sh` is idempotent and does everything end-to-end:
 
-1. **System deps via apt** — `python3-venv`, `python3-pyatspi`, `at-spi2-core`, `gnome-screenshot`. Runs `sudo apt-get install` only if anything is missing. Pass `--skip-apt` to manage them yourself.
-2. **Venv** at `~/.local/share/gtk-a11y-mcp/.venv/` with `--system-site-packages` so it can see the apt-installed `python3-pyatspi` (not on PyPI).
-3. **Editable install** of the project into the venv. Console script lands at `~/.local/share/gtk-a11y-mcp/.venv/bin/gtk-a11y-mcp`.
-4. **AI client registration** — adds the server to Claude Code (`claude mcp add --scope user gtk-a11y -- <path>`) and Codex CLI (`codex mcp add gtk-a11y -- <path>`) when those CLIs are on PATH and a `gtk-a11y` entry doesn't already exist.
+1. **System deps via apt** — `python3-venv`, `python3-pyatspi`, `at-spi2-core`, `gnome-screenshot`, `unzip`. Runs `sudo apt-get install` only if anything is missing. Pass `--skip-apt` to manage them yourself.
+2. **Source detection** — local clone or fetched release zip (or `git clone` of `main` as a fallback if no release zip is found). Pin a specific release with `--version vX.Y.Z`.
+3. **Venv** at `~/.local/share/gtk-a11y-mcp/.venv/` with `--system-site-packages` so it can see the apt-installed `python3-pyatspi` (not on PyPI).
+4. **Editable install** of the project into the venv. Console script lands at `~/.local/share/gtk-a11y-mcp/.venv/bin/gtk-a11y-mcp`.
+5. **AI client registration** — adds the server to Claude Code (`claude mcp add --scope user gtk-a11y -- <path>`) and Codex CLI (`codex mcp add gtk-a11y -- <path>`) when those CLIs are on PATH and a `gtk-a11y` entry doesn't already exist.
 
 Re-running is a no-op when nothing has changed.
 

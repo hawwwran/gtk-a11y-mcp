@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build gtk-a11y-mcp.zip
+        run: |
+          git archive \
+            --format=zip \
+            --prefix=gtk-a11y-mcp/ \
+            "${GITHUB_REF_NAME}" \
+            -o gtk-a11y-mcp.zip
+          ls -la gtk-a11y-mcp.zip
+          unzip -l gtk-a11y-mcp.zip | head -20
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            gtk-a11y-mcp.zip
