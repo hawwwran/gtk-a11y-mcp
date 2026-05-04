@@ -44,28 +44,33 @@ The server **does not write any system settings**. `status` reads the gsetting p
 
 ## Install
 
-System dependencies (Ubuntu / Zorin / Debian):
-
 ```bash
-sudo apt install python3-venv python3-pyatspi at-spi2-core gnome-screenshot
-```
-
-Then:
-
-```bash
-git clone https://github.com/<you>/gtk-a11y-mcp.git
+git clone https://github.com/hawwwran/gtk-a11y-mcp.git
 cd gtk-a11y-mcp
 ./scripts/install.sh
 ```
 
-That creates a venv at `~/.local/share/gtk-a11y-mcp/.venv/` (with `--system-site-packages` so it can see the apt-installed `python3-pyatspi`, which is not on PyPI) and editable-installs the project into it. The console script `gtk-a11y-mcp` lands in that venv's `bin/`.
+`scripts/install.sh` is idempotent and does everything end-to-end:
 
-## Register with Claude Code
+1. **System deps via apt** — `python3-venv`, `python3-pyatspi`, `at-spi2-core`, `gnome-screenshot`. Runs `sudo apt-get install` only if anything is missing. Pass `--skip-apt` to manage them yourself.
+2. **Venv** at `~/.local/share/gtk-a11y-mcp/.venv/` with `--system-site-packages` so it can see the apt-installed `python3-pyatspi` (not on PyPI).
+3. **Editable install** of the project into the venv. Console script lands at `~/.local/share/gtk-a11y-mcp/.venv/bin/gtk-a11y-mcp`.
+4. **AI client registration** — adds the server to Claude Code (`claude mcp add --scope user gtk-a11y -- <path>`) and Codex CLI (`codex mcp add gtk-a11y -- <path>`) when those CLIs are on PATH and a `gtk-a11y` entry doesn't already exist.
 
-Globally (user-scope):
+Re-running is a no-op when nothing has changed.
+
+## Manual registration (if you skipped step 4)
+
+For Claude Code:
 
 ```bash
 claude mcp add --scope user gtk-a11y -- "$HOME/.local/share/gtk-a11y-mcp/.venv/bin/gtk-a11y-mcp"
+```
+
+For Codex CLI:
+
+```bash
+codex mcp add gtk-a11y -- "$HOME/.local/share/gtk-a11y-mcp/.venv/bin/gtk-a11y-mcp"
 ```
 
 Or edit `~/.claude.json` directly:
