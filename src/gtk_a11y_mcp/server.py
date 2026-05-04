@@ -14,7 +14,8 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
-from typing import Any
+import time
+from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -137,6 +138,86 @@ def _resolve_path(root, target: str):
 
     visit(root, "")
     return found[0] if found else None
+
+
+def _wait_until(
+    predicate: Callable[[], Any],
+    timeout_s: float,
+    poll_ms: int,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> tuple[Any, float]:
+    """Poll `predicate()` until it returns truthy or `timeout_s` elapses.
+
+    Returns the (last_value, elapsed_ms). `last_value` is whatever the
+    predicate returned on the final iteration -- truthy on success,
+    falsy on timeout. Tests inject `sleep` and `monotonic` to mock the
+    clock without sleeping in the test process.
+    """
+    start = monotonic()
+    deadline = start + max(0.0, float(timeout_s))
+    interval = max(0.001, poll_ms / 1000.0)
+    while True:
+        value = predicate()
+        if value:
+            return value, (monotonic() - start) * 1000.0
+        if monotonic() >= deadline:
+            return value, (monotonic() - start) * 1000.0
+        sleep(interval)
+
+
+def _screen_locked_dbus(
+    runner: Callable[[list[str]], str] | None = None,
+) -> bool | None:
+    """Return whether the GNOME ScreenSaver reports the session as locked.
+
+    Returns ``None`` when the answer can't be determined (D-Bus call
+    failed, gdbus missing, no GNOME ScreenSaver). The default runner
+    shells out to `gdbus`.
+    """
+    if runner is None:
+        def runner(cmd: list[str]) -> str:
+            return subprocess.check_output(cmd, text=True, timeout=2.0)
+    try:
+        out = runner([
+            "gdbus", "call", "--session",
+            "--dest", "org.gnome.ScreenSaver",
+            "--object-path", "/org/gnome/ScreenSaver",
+            "--method", "org.gnome.ScreenSaver.GetActive",
+        ])
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    text = out.strip().lower()
+    if "true" in text:
+        return True
+    if "false" in text:
+        return False
+    return None
+
+
+def _active_frame_app(pyatspi) -> str | None:
+    """Return the app name of the AT-SPI frame currently in STATE_ACTIVE."""
+    try:
+        active_state = pyatspi.STATE_ACTIVE
+    except AttributeError:
+        return None
+    desktop = pyatspi.Registry.getDesktop(0)
+    for i in range(desktop.childCount):
+        try:
+            app = desktop.getChildAtIndex(i)
+        except Exception:
+            continue
+        for j in range(getattr(app, "childCount", 0) or 0):
+            try:
+                frame = app.getChildAtIndex(j)
+                if frame.getRoleName() != "frame":
+                    continue
+                if frame.getState().contains(active_state):
+                    return app.name or ""
+            except Exception:
+                continue
+    return None
 
 
 @mcp.tool()
@@ -305,6 +386,112 @@ def status() -> dict[str, Any]:
         out["apps_on_bus"] = desktop.childCount
     except Exception as e:
         out["apps_on_bus"] = f"<error: {e}>"
+    return out
+
+
+@mcp.tool()
+def wait_for_app(
+    app_name: str,
+    timeout_s: float = 10.0,
+    poll_ms: int = 250,
+) -> dict[str, Any]:
+    """Block until an app matching ``app_name`` appears on the AT-SPI bus.
+
+    Saves a ScheduleWakeup-after-launch dance: launch the app with
+    ``GTK_A11Y=atspi`` in the same turn, then call this tool. Returns
+    ``{found, app_name, child_count, elapsed_ms, hint?}``. Substring
+    match on app name (matches ``_find_app``).
+    """
+    def probe() -> dict[str, Any] | None:
+        app = _find_app(app_name)
+        if app is None:
+            return None
+        return {"app_name": app.name or "", "child_count": app.childCount}
+
+    value, elapsed_ms = _wait_until(probe, timeout_s, poll_ms)
+    if not value:
+        return {"found": False, "elapsed_ms": elapsed_ms, "hint": LAUNCH_HINT}
+    return {"found": True, "elapsed_ms": elapsed_ms, **value}
+
+
+@mcp.tool()
+def wait_for_widget(
+    app_name: str,
+    role: str | None = None,
+    name: str | None = None,
+    timeout_s: float = 10.0,
+    poll_ms: int = 250,
+) -> dict[str, Any]:
+    """Block until a widget matching ``role`` and/or ``name`` exists.
+
+    Useful after a click that triggers an async refresh. Returns
+    ``{found, path, role, name, elapsed_ms}``. On timeout ``found`` is
+    False and ``path`` is empty.
+    """
+    def probe() -> dict[str, Any] | None:
+        app = _find_app(app_name)
+        if app is None:
+            return None
+        results: list[dict[str, Any]] = []
+        _walk_match(app, role, name, results, max_results=1)
+        if not results:
+            return None
+        return results[0]
+
+    value, elapsed_ms = _wait_until(probe, timeout_s, poll_ms)
+    if not value:
+        return {"found": False, "path": "", "role": "", "name": "", "elapsed_ms": elapsed_ms}
+    return {"found": True, "elapsed_ms": elapsed_ms, **value}
+
+
+@mcp.tool()
+def click_by_path(app_name: str, path: str) -> str:
+    """Invoke the default Action ('click') on a widget by its exact path.
+
+    Use the ``path`` returned by ``find_widgets`` -- bypasses the
+    ambiguity error that ``click(role, name)`` raises when two widgets
+    share a name (e.g. a tree row and a list cell).
+    """
+    app = _find_app(app_name)
+    if app is None:
+        return f"No app '{app_name}' on AT-SPI bus. {LAUNCH_HINT}"
+    node = _resolve_path(app, path)
+    if node is None:
+        return f"Couldn't resolve path: {path}"
+    try:
+        action = node.queryAction()
+    except NotImplementedError:
+        return f"Widget at {path} has no Action interface."
+    try:
+        action.doAction(0)
+    except Exception as e:
+        return f"doAction failed: {e}"
+    return f"Clicked: {path}"
+
+
+@mcp.tool()
+def screen_status() -> dict[str, Any]:
+    """Pre-flight diagnostics for ``screenshot`` and friends.
+
+    Returns ``{session_type, locked, active_app}``. ``locked`` is
+    ``None`` when the GNOME ScreenSaver D-Bus answer wasn't available.
+    ``active_app`` is the AT-SPI app whose frame is in STATE_ACTIVE,
+    or ``None`` if no frame reports active. Use to decide whether
+    ``screenshot`` will return anything useful: if the screen is
+    locked, the compositor isn't painting client surfaces; if the
+    active app isn't yours, ``screenshot(window_only=True)`` will grab
+    a different window than you expect.
+    """
+    out: dict[str, Any] = {
+        "session_type": os.environ.get("XDG_SESSION_TYPE", ""),
+        "locked": _screen_locked_dbus(),
+        "active_app": None,
+    }
+    try:
+        pyatspi = _import_pyatspi()
+        out["active_app"] = _active_frame_app(pyatspi)
+    except Exception as e:
+        out["active_app_error"] = str(e)
     return out
 
 

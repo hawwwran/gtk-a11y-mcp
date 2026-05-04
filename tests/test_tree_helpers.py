@@ -125,3 +125,103 @@ def test_walk_match_handles_node_without_name():
     _walk_match(tree, role="push button", name="ok", results=results)
     assert len(results) == 1
     assert results[0]["path"] == "frame[]/push button[OK]"
+
+
+# ---------------------------------------------------------------------------
+# _wait_until: predicate polling with mocked clock
+# ---------------------------------------------------------------------------
+
+from gtk_a11y_mcp.server import _screen_locked_dbus, _wait_until
+
+
+class FakeClock:
+    """Mock monotonic + sleep so we can drive _wait_until deterministically."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def test_wait_until_returns_first_truthy_predicate_value():
+    clock = FakeClock()
+    calls = iter([None, None, "found-it"])
+    value, elapsed_ms = _wait_until(
+        lambda: next(calls),
+        timeout_s=10.0,
+        poll_ms=250,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert value == "found-it"
+    # Two sleeps before success; each interval = 0.25 s -> ~500 ms elapsed.
+    assert clock.sleeps == [0.25, 0.25]
+    assert 400 <= elapsed_ms <= 600
+
+
+def test_wait_until_returns_falsy_on_timeout_without_sleeping_past_deadline():
+    clock = FakeClock()
+    value, elapsed_ms = _wait_until(
+        lambda: None,
+        timeout_s=1.0,
+        poll_ms=250,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert value is None
+    # Deadline is 1.0 s; we should not sleep again past that.
+    assert sum(clock.sleeps) <= 1.0 + 1e-6
+    assert elapsed_ms >= 1000.0
+
+
+def test_wait_until_short_circuits_when_predicate_truthy_first_call():
+    clock = FakeClock()
+    value, elapsed_ms = _wait_until(
+        lambda: True,
+        timeout_s=5.0,
+        poll_ms=250,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert value is True
+    assert clock.sleeps == []
+    assert elapsed_ms == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _screen_locked_dbus: parses gdbus output via injected runner
+# ---------------------------------------------------------------------------
+
+
+def test_screen_locked_returns_true_when_gdbus_says_true():
+    assert _screen_locked_dbus(runner=lambda _cmd: "(true,)\n") is True
+
+
+def test_screen_locked_returns_false_when_gdbus_says_false():
+    assert _screen_locked_dbus(runner=lambda _cmd: "(false,)\n") is False
+
+
+def test_screen_locked_returns_none_when_gdbus_unavailable():
+    def boom(_cmd):
+        raise FileNotFoundError("no gdbus")
+
+    assert _screen_locked_dbus(runner=boom) is None
+
+
+def test_screen_locked_returns_none_when_gdbus_call_fails():
+    import subprocess
+
+    def boom(_cmd):
+        raise subprocess.CalledProcessError(1, _cmd, output="error")
+
+    assert _screen_locked_dbus(runner=boom) is None
+
+
+def test_screen_locked_returns_none_when_response_unparseable():
+    assert _screen_locked_dbus(runner=lambda _cmd: "weird\n") is None
