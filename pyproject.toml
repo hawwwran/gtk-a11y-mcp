@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gtk-a11y-mcp"
+version = "0.1.0"
+description = "MCP server that drives GTK4/libadwaita apps via the GNOME accessibility bus, with auto-managed toolkit-accessibility lifecycle."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "gtk-a11y-mcp contributors" }]
+keywords = ["mcp", "gtk", "at-spi", "accessibility", "gnome", "testing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+]
+
+[project.scripts]
+gtk-a11y-mcp = "gtk_a11y_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gtk_a11y_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
