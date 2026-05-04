@@ -10,67 +10,62 @@ GUI testing/development of GTK apps from an AI client is hard:
 - Screenshot-only loops can't read text the LLM can't see, can't invoke widgets directly, and burn tokens.
 - The GNOME accessibility bus already exposes the full widget tree to screen readers; this server just plugs that into MCP — read the tree, click named buttons, type into named entries.
 
-There's one catch on stock GNOME: `org.gnome.desktop.interface toolkit-accessibility` defaults to `false`, so GTK apps don't actually export widgets to AT-SPI until that's flipped. This server flips it on first use and restores the prior value at shutdown — including a watchdog that catches orphaned-on state from a hard kill.
+## How AT-SPI export is enabled (the safe way)
+
+Stock GNOME ships with `org.gnome.desktop.interface toolkit-accessibility = false`, so GTK apps don't expose their widget tree to AT-SPI by default.
+
+**This server never touches that gsetting.** Hot-flipping it on a live GNOME Wayland session can take `gnome-shell` (the compositor) down with it — the entire desktop session ends and unsaved work is lost.
+
+Instead, expose **only the app you're testing**, per-process, by setting `GTK_A11Y=atspi` on its launch:
+
+```bash
+GTK_A11Y=atspi python3 -m src.main             # your app
+GTK_A11Y=atspi gnome-calculator                 # any GTK4 app
+```
+
+That env var wins over the global gsetting. Only that one process appears on the bus. Everything else in your session is unaffected. Quit the app and it's gone from the bus.
+
+If you really want export *globally* (because you're going to be testing all the time): set the gsetting once, **then log out and back in** so `gnome-shell` starts with it. Don't toggle it inside a running session.
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `list_apps` | Apps visible on the AT-SPI bus |
+| `list_apps` | Apps currently on the AT-SPI bus |
 | `dump_tree(app, max_depth=8)` | Pretty-print an app's widget tree |
 | `find_widgets(app, role?, name?)` | Search the tree by role and/or name (substring) |
 | `click(app, name, role="push button")` | Invoke the default Action on a widget |
 | `get_text(app, role, name)` | Read the text content of a widget |
 | `type_text(app, role, name, text)` | Set the contents of an editable widget |
 | `screenshot(window_only=true)` | `gnome-screenshot` of active window or full screen |
-| `release_a11y` | Disable toolkit-accessibility now (next call re-enables) |
-| `status` | Current lifecycle state |
+| `status` | Diagnostic snapshot (read-only): `toolkit-accessibility` value + apps-on-bus count + launch hint |
 
-## Lifecycle
-
-```
-acquire (first widget call)  →  read current toolkit-accessibility, flip to true if needed,
-                                 record prior value + PID in $XDG_STATE_HOME/gtk-a11y-mcp/state.json
-
-release (clean shutdown)     →  restore prior value, delete state file
-
-cleanup_orphans (next start) →  if state file exists and recorded PID is dead,
-                                 restore prior value and remove the file
-```
-
-Worst case (server killed `-9` *and* nothing relaunches it): `toolkit-accessibility` stays `true`. Cosmetic perf cost; nothing breaks. Flip it back manually with `gsettings set org.gnome.desktop.interface toolkit-accessibility false` if you care.
+The server **does not write any system settings**. `status` reads the gsetting purely to surface it; it never sets it.
 
 ## Install
 
 System dependencies (Ubuntu / Zorin / Debian):
 
 ```bash
-sudo apt install python3-pyatspi python3-dogtail at-spi2-core gnome-screenshot
+sudo apt install python3-venv python3-pyatspi at-spi2-core gnome-screenshot
 ```
 
-Then either install the package:
+Then:
 
 ```bash
 git clone https://github.com/<you>/gtk-a11y-mcp.git
 cd gtk-a11y-mcp
-pip install --user .
+./scripts/install.sh
 ```
 
-…or run from a checkout without installing:
-
-```bash
-pip install --user mcp
-python -m gtk_a11y_mcp
-```
-
-`python3-pyatspi` is a system package and is **not** available on PyPI — keep it apt-installed; pip won't help.
+That creates a venv at `~/.local/share/gtk-a11y-mcp/.venv/` (with `--system-site-packages` so it can see the apt-installed `python3-pyatspi`, which is not on PyPI) and editable-installs the project into it. The console script `gtk-a11y-mcp` lands in that venv's `bin/`.
 
 ## Register with Claude Code
 
 Globally (user-scope):
 
 ```bash
-claude mcp add --scope user gtk-a11y -- gtk-a11y-mcp
+claude mcp add --scope user gtk-a11y -- "$HOME/.local/share/gtk-a11y-mcp/.venv/bin/gtk-a11y-mcp"
 ```
 
 Or edit `~/.claude.json` directly:
@@ -79,23 +74,7 @@ Or edit `~/.claude.json` directly:
 {
   "mcpServers": {
     "gtk-a11y": {
-      "command": "gtk-a11y-mcp"
-    }
-  }
-}
-```
-
-If you didn't `pip install` and are running from a checkout:
-
-```json
-{
-  "mcpServers": {
-    "gtk-a11y": {
-      "command": "python3",
-      "args": ["-m", "gtk_a11y_mcp"],
-      "env": {
-        "PYTHONPATH": "/path/to/gtk-a11y-mcp/src"
-      }
+      "command": "/home/<you>/.local/share/gtk-a11y-mcp/.venv/bin/gtk-a11y-mcp"
     }
   }
 }
@@ -104,17 +83,18 @@ If you didn't `pip install` and are running from a checkout:
 ## Tests
 
 ```bash
-pip install --user pytest
-pytest
+~/.local/share/gtk-a11y-mcp/.venv/bin/pip install pytest
+cd <repo>
+~/.local/share/gtk-a11y-mcp/.venv/bin/pytest
 ```
 
-Unit tests cover lifecycle (acquire / release / orphan cleanup) with `gsettings` mocked so they're hermetic.
+Tests use mock AT-SPI nodes so they don't require a live bus.
 
 ## Caveats
 
-- **GNOME-flavored.** AT-SPI works on KDE/sway too, but the `toolkit-accessibility` gsettings key is GNOME-specific. On other DEs the toggle is a no-op; this server still works if AT-SPI is already exposing widgets.
+- **GNOME-flavored.** AT-SPI works on KDE/sway too, but `GTK_A11Y=atspi` is GTK-specific (Qt apps need their own AT-SPI bridge). The server itself is desktop-environment-agnostic — anything on the AT-SPI bus is fair game.
 - **Tray icons (StatusIcon / pystray) are not AT-SPI-exposed.** Drive the windows the tray spawns instead, or invoke window subprocesses directly.
-- **GTK apps register at startup.** Apps already running when the gate flips need a restart before they appear on the bus.
+- **Apps register with AT-SPI at startup.** An already-running app can't be retroactively added to the bus — relaunch it with `GTK_A11Y=atspi`.
 - `python3-pyatspi` emits `SyntaxWarning` on Python 3.12+ — cosmetic, upstream issue.
 
 ## License

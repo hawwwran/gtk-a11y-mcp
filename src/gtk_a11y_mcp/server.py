@@ -1,10 +1,12 @@
 """GTK AT-SPI MCP server.
 
 Tools to drive GTK4/libadwaita apps via the GNOME accessibility bus.
-toolkit-accessibility lifecycle is auto-managed by lifecycle.py:
-- first widget tool call flips the key on (recording prior value)
-- clean shutdown restores prior value
-- next startup heals orphan state from a hard kill
+
+The server NEVER touches `org.gnome.desktop.interface toolkit-accessibility`.
+Hot-flipping that key on a live GNOME Wayland session can take gnome-shell
+(the compositor) down with it. Per-process AT-SPI export is achieved by
+launching the target app with `GTK_A11Y=atspi` instead -- env var wins
+over the global gsetting and only affects that one process.
 """
 
 from __future__ import annotations
@@ -16,9 +18,12 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP, Image
 
-from . import lifecycle
-
 mcp = FastMCP("gtk-a11y")
+
+LAUNCH_HINT = (
+    "Launch your app with GTK_A11Y=atspi to expose it on the bus, e.g. "
+    "`GTK_A11Y=atspi python3 -m src.main`."
+)
 
 
 def _import_pyatspi():
@@ -29,10 +34,6 @@ def _import_pyatspi():
             "python3-pyatspi missing. Install: sudo apt install python3-pyatspi"
         ) from e
     return pyatspi
-
-
-def _ensure() -> None:
-    lifecycle.acquire()
 
 
 def _find_app(name: str):
@@ -139,28 +140,32 @@ def _resolve_path(root, target: str):
 
 
 @mcp.tool()
-def list_apps() -> list[dict[str, Any]]:
-    """List applications visible on the AT-SPI bus."""
-    _ensure()
+def list_apps() -> dict[str, Any]:
+    """List applications visible on the AT-SPI bus.
+
+    If empty, the target app probably wasn't launched with GTK_A11Y=atspi.
+    """
     pyatspi = _import_pyatspi()
     desktop = pyatspi.Registry.getDesktop(0)
-    out: list[dict[str, Any]] = []
+    apps: list[dict[str, Any]] = []
     for i in range(desktop.childCount):
         try:
             app = desktop.getChildAtIndex(i)
-            out.append({"name": app.name or "", "child_count": app.childCount})
+            apps.append({"name": app.name or "", "child_count": app.childCount})
         except Exception:
             continue
+    out: dict[str, Any] = {"apps": apps, "count": len(apps)}
+    if not apps:
+        out["hint"] = LAUNCH_HINT
     return out
 
 
 @mcp.tool()
 def dump_tree(app_name: str, max_depth: int = 8) -> str:
     """Pretty-print the AT-SPI widget tree for an app (substring match on name)."""
-    _ensure()
     app = _find_app(app_name)
     if app is None:
-        return f"No app matching '{app_name}' on AT-SPI bus."
+        return f"No app matching '{app_name}' on AT-SPI bus. {LAUNCH_HINT}"
     lines: list[str] = []
     _walk_tree(app, 0, max_depth, lines)
     return "\n".join(lines)
@@ -173,7 +178,6 @@ def find_widgets(
     name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Find widgets in an app by role and/or name (substring match on name)."""
-    _ensure()
     app = _find_app(app_name)
     if app is None:
         return []
@@ -185,10 +189,9 @@ def find_widgets(
 @mcp.tool()
 def click(app_name: str, name: str, role: str = "push button") -> str:
     """Invoke the default Action ('click') on a widget identified by role + name."""
-    _ensure()
     app = _find_app(app_name)
     if app is None:
-        return f"No app '{app_name}' on AT-SPI bus."
+        return f"No app '{app_name}' on AT-SPI bus. {LAUNCH_HINT}"
     results: list[dict[str, Any]] = []
     _walk_match(app, role, name, results, max_results=2)
     if not results:
@@ -215,10 +218,9 @@ def click(app_name: str, name: str, role: str = "push button") -> str:
 @mcp.tool()
 def get_text(app_name: str, role: str, name: str) -> str:
     """Read the text content of a widget."""
-    _ensure()
     app = _find_app(app_name)
     if app is None:
-        return f"No app '{app_name}' on AT-SPI bus."
+        return f"No app '{app_name}' on AT-SPI bus. {LAUNCH_HINT}"
     results: list[dict[str, Any]] = []
     _walk_match(app, role, name, results, max_results=1)
     if not results:
@@ -236,10 +238,9 @@ def get_text(app_name: str, role: str, name: str) -> str:
 @mcp.tool()
 def type_text(app_name: str, role: str, name: str, text: str) -> str:
     """Set the contents of an editable widget (entry / text field)."""
-    _ensure()
     app = _find_app(app_name)
     if app is None:
-        return f"No app '{app_name}' on AT-SPI bus."
+        return f"No app '{app_name}' on AT-SPI bus. {LAUNCH_HINT}"
     results: list[dict[str, Any]] = []
     _walk_match(app, role, name, results, max_results=1)
     if not results:
@@ -283,25 +284,31 @@ def screenshot(window_only: bool = True) -> Image:
 
 
 @mcp.tool()
-def release_a11y() -> dict[str, Any]:
-    """Disable toolkit-accessibility now (restore prior value).
-
-    Next widget-touching tool call will re-acquire automatically.
-    """
-    was_held = lifecycle.is_acquired()
-    lifecycle.release()
-    return {"released": was_held, "status": lifecycle.get_status()}
-
-
-@mcp.tool()
 def status() -> dict[str, Any]:
-    """Report current toolkit-accessibility lifecycle state."""
-    return lifecycle.get_status()
+    """Diagnostic snapshot: gsetting value (read-only) + apps on bus.
+
+    Never sets the gsetting -- flipping it on a live Wayland session can
+    crash gnome-shell. If apps are missing, launch them with GTK_A11Y=atspi.
+    """
+    out: dict[str, Any] = {"hint": LAUNCH_HINT}
+    try:
+        gs = subprocess.check_output(
+            ["gsettings", "get", "org.gnome.desktop.interface", "toolkit-accessibility"],
+            text=True,
+        ).strip()
+        out["toolkit_accessibility"] = gs
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        out["toolkit_accessibility"] = f"<read failed: {e}>"
+    try:
+        pyatspi = _import_pyatspi()
+        desktop = pyatspi.Registry.getDesktop(0)
+        out["apps_on_bus"] = desktop.childCount
+    except Exception as e:
+        out["apps_on_bus"] = f"<error: {e}>"
+    return out
 
 
 def main() -> None:
-    lifecycle.cleanup_orphans()
-    lifecycle.install_signal_handlers()
     mcp.run()
 
 
