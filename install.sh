@@ -57,7 +57,13 @@ ok()   { printf '    %s%s%s\n' "$C_GREEN" "$*" "$NC"; }
 warn() { printf '    %s%s%s\n' "$C_YELLOW" "$*" "$NC" >&2; }
 die()  { printf '\n%sFAIL:%s %s\n' "$C_RED" "$NC" "$*" >&2; exit 1; }
 
-cleanup() { [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]] && rm -rf "$TEMP_DIR"; }
+cleanup() {
+    # Always return 0 -- this runs from the EXIT trap and its exit status
+    # otherwise leaks back as the script's exit code (e.g. when TEMP_DIR is
+    # empty in LOCAL mode, the test `[[ -n "" ]]` evaluates to false).
+    [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]] && rm -rf "$TEMP_DIR"
+    return 0
+}
 trap cleanup EXIT
 
 # ---- arg parsing ------------------------------------------------------------
