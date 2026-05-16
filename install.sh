@@ -11,7 +11,9 @@
 #
 # Both modes do the same thing afterward:
 #   1. apt deps (python3-venv python3-pyatspi at-spi2-core gnome-screenshot
-#      unzip) -- only the missing ones, only if any are missing.
+#      python3-pil ydotool unzip) -- only the missing ones, only if any are
+#      missing. python3-pil powers screenshot_widget cropping; ydotool is
+#      the Wayland keyboard-injection fallback for press_keys.
 #   2. venv at $HOME/.local/share/gtk-a11y-mcp/.venv with --system-site-packages
 #   3. editable pip install of the project into the venv
 #   4. Register with Claude Code (--scope user) and Codex CLI when those CLIs
@@ -32,7 +34,7 @@ GH_REPO="hawwwran/gtk-a11y-mcp"
 ASSET_NAME="gtk-a11y-mcp.zip"
 VENV_DIR="${VENV_DIR:-$HOME/.local/share/gtk-a11y-mcp/.venv}"
 SERVER_NAME="${SERVER_NAME:-gtk-a11y}"
-APT_PACKAGES=(python3-venv python3-pyatspi at-spi2-core gnome-screenshot unzip)
+APT_PACKAGES=(python3-venv python3-pyatspi at-spi2-core gnome-screenshot python3-pil ydotool unzip)
 
 SKIP_APT=0
 VERSION_PIN=""
@@ -142,7 +144,8 @@ ensure_apt_deps() {
         cat >&2 <<EOF
 This installer assumes apt (Debian / Ubuntu / Zorin). On other distros, install
 the equivalents manually and re-run with --skip-apt:
-  python3-venv, python3-pyatspi, at-spi2-core, gnome-screenshot, unzip
+  python3-venv, python3-pyatspi, at-spi2-core, gnome-screenshot,
+  python3-pil, ydotool, unzip
 EOF
         exit 1
     fi
@@ -241,6 +244,46 @@ ensure_venv_install
 step "AI client registration"
 register_with claude "--scope user"
 register_with codex ""
+
+step "Verifying runtime tools"
+# Each check warns rather than dies so a partial install still completes.
+# Severity = (whether the server can do anything useful without it).
+verify_runtime() {
+    local fatal=0
+    if "$VENV_DIR/bin/python" -c "import pyatspi" >/dev/null 2>&1; then
+        ok "python3-pyatspi: OK (AT-SPI bridge)"
+    else
+        warn "python3-pyatspi MISSING -- server can't talk to AT-SPI at all"
+        fatal=1
+    fi
+    if command -v gnome-screenshot >/dev/null 2>&1; then
+        ok "gnome-screenshot: OK (screenshot / screenshot_widget)"
+    else
+        warn "gnome-screenshot missing -- screenshot tools will fail"
+    fi
+    if "$VENV_DIR/bin/python" -c "import PIL" >/dev/null 2>&1; then
+        ok "Pillow: OK (screenshot_widget cropping)"
+    else
+        warn "Pillow (python3-pil) missing -- screenshot_widget will fail"
+    fi
+    if command -v ydotool >/dev/null 2>&1; then
+        ok "ydotool: OK (press_keys Wayland fallback)"
+        if ! pgrep -x ydotoold >/dev/null 2>&1; then
+            warn "ydotoold daemon not running -- press_keys ydotool fallback will fail"
+            log "  start it (one-off):  sudo ydotoold &"
+            log "  or enable systemd unit per your distro's ydotool docs"
+        fi
+    else
+        warn "ydotool missing -- press_keys has no Wayland fallback"
+    fi
+    if command -v gdbus >/dev/null 2>&1; then
+        ok "gdbus: OK (screen_status lock detection)"
+    else
+        warn "gdbus missing -- screen_status will report locked=null"
+    fi
+    [[ $fatal -eq 0 ]] || die "core deps missing; install can't proceed"
+}
+verify_runtime
 
 step "Done"
 log "Launch any GTK4 app with the AT-SPI bridge to expose it to the MCP:"
